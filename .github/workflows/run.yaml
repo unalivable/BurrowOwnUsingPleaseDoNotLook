@@ -34,4 +34,4 @@ jobs:
         env:
           LINK_ID: ${{ secrets.LINK_ID }}
         run: |
-          timeout -s SIGTERM 21590 python burrow.py -s ${LINK_ID} --p2p
+          timeout -s SIGTERM 21590 python burrow.py -s
