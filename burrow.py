@@ -1,4 +1,4 @@
-import argparse, asyncio, json, os, signal, socket, struct, time, uuid, zlib
+import argparse, asyncio, json, os, signal, socket, struct, time, uuid, zlib, sys
 import urllib.request, urllib.parse, requests, threading, traceback, ssl, re
 from aioice import Candidate, Connection
 from aioice import stun, turn
@@ -37,43 +37,61 @@ def _patched_dgram_recv(self, data, addr):
     except Exception: pass
     _original_dgram_recv(self, data, addr)
 turn.TurnClientMixin.datagram_received = _patched_dgram_recv
-BANNER = "ICBfX19fICBfXyAgIF9fICBfX19fICBfX19fICBfX19fXyAgXyAgICBfClwgIF8gXChcICBcLyBcLyAgXyBcKCAgXyBcKCAgXyAgKShcIFwvXC8gKQogKSA8ICkoX18pKCAgKSAgIC8gKSAgIC8gKShfKSggICkgICAgXAooX19fXy8oX19fX18vKFxfKVxfKF8pXF8pKF9fX19fKShfXy9cX18p"
-COPYRIGHT = "Q29weXJpZ2h0IChjKSAyMDI2IHVuYWxpdmFibGU="
-import base64 as _b64
-BANNER = _b64.b64decode(BANNER).decode()
-COPYRIGHT = _b64.b64decode(COPYRIGHT).decode()
+"""
+"""
 W = "https://webdav.yandex.ru/burrow-signal"
-try:
-    from burrow_secrets import YA_LOGIN, YA_PASSWORD
-    A = (YA_LOGIN, YA_PASSWORD)
-except: A = ("", "")
-Y = "5.255.211.245"
 _quit_flag = False
 _cleanup_done = False
 CONFIG_DIR = os.path.expanduser("~/.burrow")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 os.makedirs(CONFIG_DIR, exist_ok=True)
 MAX_CLIENTS = 10
+
+# Global auth variable
+A = None
+
+def _get_auth():
+    global A
+    if A is not None:
+        return A
+    
+    config = _load_config()
+    dav_auth = config.get("dav", "")
+    
+    if dav_auth and ":" in dav_auth:
+        login, password = dav_auth.split(":", 1)
+        A = (login, password)
+        return A
+    
+    A = ("", "")
+    return A
+
 def _load_config():
     if os.path.exists(CONFIG_FILE):
         try: return json.load(open(CONFIG_FILE))
         except: pass
-    return {"port": 9000, "upstream": "musicclips.videolinks.ru:8443", "mode": "client", "link_id": ""}
+    return {"port": 9000, "upstream": "musicclips.videolinks.ru:8443", "mode": "client", "link_id": "", "dav": ""}
+
 def _save_config(cfg):
     with open(CONFIG_FILE, "w") as f: json.dump(cfg, f, indent=2)
+
 def _c():
     global _cleanup_done
     if _cleanup_done: return
     _cleanup_done = True
+    auth = _get_auth()
     for slot in range(MAX_CLIENTS):
         for f in [f"offer_{slot}.sdp", f"answer_{slot}.sdp"]:
-            try: requests.delete(f"{W}/{f}", auth=A)
+            try: requests.delete(f"{W}/{f}", auth=auth)
             except: pass
+
 def _sig_handler(sig, frame):
     global _quit_flag
     if _quit_flag: os._exit(1)
     _quit_flag = True; _c(); os._exit(0)
+
 signal.signal(signal.SIGINT, _sig_handler); signal.signal(signal.SIGTERM, _sig_handler)
+
 def _resolve(host, dns='77.88.8.8'):
     try: socket.inet_aton(host); return host
     except: pass
@@ -97,16 +115,19 @@ def _resolve(host, dns='77.88.8.8'):
             pos += rdl
         return host
     except: return host
+
 def _parse_turn_uri(uri):
     m = re.match(r"turn(?:s)?\:(?P<host>[^?:]+)(?:\:(?P<port>\d+))?(?:\?transport=(?P<transport>\w+))?", uri)
     if not m: raise ValueError(f"Invalid TURN URI: {uri}")
     host = m.group("host"); port = int(m.group("port") or 3478)
     transport = m.group("transport") or "udp"; ssl = uri.startswith("turns")
     return host, port, transport, ssl
+
 def _make_connection(turn_uri, username, credential, stun_server=None):
     host, port, transport, ssl = _parse_turn_uri(turn_uri)
     return Connection(stun_server=stun_server, turn_server=(host, port), turn_username=username,
                       turn_password=credential, turn_transport=transport, turn_ssl=ssl, ice_controlling=True)
+
 def _g(link_id):
     l = f"https://telemost.yandex.ru/j/{link_id}"; h = l.split("j/")[-1]
     e = f"https://cloud-api.yandex.ru/telemost_front/v2/telemost/conferences/https%3A%2F%2Ftelemost.yandex.ru%2Fj%2F{h}/connection?next_gen_media_platform_allowed=false"
@@ -161,22 +182,30 @@ def _g(link_id):
     loop = asyncio.new_event_loop()
     try: return loop.run_until_complete(_w())
     finally: loop.close()
+
 def _u(f, data):
     if _quit_flag: return
-    requests.put(f"{W}/{f}", data=data.encode() if isinstance(data,str) else data, auth=A)
+    auth = _get_auth()
+    requests.put(f"{W}/{f}", data=data.encode() if isinstance(data,str) else data, auth=auth)
+
 def _d(f):
     if _quit_flag: return None
-    r = requests.get(f"{W}/{f}", auth=A)
+    auth = _get_auth()
+    r = requests.get(f"{W}/{f}", auth=auth)
     return r.text if r.status_code == 200 else None
+
 def _del(f):
     if _quit_flag: return
-    requests.delete(f"{W}/{f}", auth=A)
+    auth = _get_auth()
+    requests.delete(f"{W}/{f}", auth=auth)
+
 def _wd(f):
     while not _quit_flag:
         s = _d(f)
         if s: return s
         time.sleep(2)
     raise KeyboardInterrupt()
+
 async def _best_connection(turn_list, stun):
     if not turn_list: raise Exception("No TURN servers available")
     async def try_server(host, port, user, pw):
@@ -191,6 +220,7 @@ async def _best_connection(turn_list, stun):
             return conn
         except Exception: continue
     raise Exception("All TURN servers failed")
+
 class _B:
     def __init__(self, port=9000, server=False, p2p=False, upstream="musicclips.videolinks.ru:8443", allowed_upstreams=None):
         self.port = port; self.server = server; self.p2p = p2p; self.upstream = upstream
@@ -198,9 +228,12 @@ class _B:
         self.pct = 0; self.bar_color = "cyan"; self.status_lines = [""] * 4; self.log_lines = []
         self.title = "[bold cyan]BURROW VPN[/]\n[dim]WebRTC TURN Tunnel[/]"
         self.link_id = ""
+        self.active_clients = {}
+        
     def _make_bar(self):
         width = 20; filled = int(width * self.pct / 100)
         return f"[{self.bar_color}]{'█' * filled + '░' * (width - filled)}[/] {self.pct}%"
+    
     def _build_table(self):
         left = Table.grid(expand=False); left.add_column(justify="center")
         left.add_row(self.title); left.add_row(self._make_bar())
@@ -211,12 +244,14 @@ class _B:
         right_panel = Panel(right, title="Logs", box=box.ROUNDED, border_style="dim cyan")
         outer = Table.grid(expand=False); outer.add_column(vertical="top"); outer.add_column(vertical="top")
         outer.add_row(left_panel, right_panel); return outer
+    
     def _update(self, live, pct=None, bar_color=None, status=None, log_msg=None):
         if pct is not None: self.pct = pct
         if bar_color is not None: self.bar_color = bar_color
         if status is not None: self.status_lines = status
         if log_msg is not None: self.log_lines.append(log_msg)
-        live.update(self._build_table())
+        if live: live.update(self._build_table())
+    
     async def start(self, link_id=""):
         self.link_id = link_id
         with Live(self._build_table(), console=console, screen=False, refresh_per_second=4) as live:
@@ -233,197 +268,443 @@ class _B:
                     self._update(live, pct=0, bar_color="red", status=[f"[red]✖ Error: {e}[/]", "", "", ""], log_msg=f"[red]Fatal: {e}[/]")
                     await asyncio.sleep(5)
             _c()
+    
     async def _run_server(self, live):
-        self._update(live, pct=85, status=["[bold]Server mode[/]", "Waiting for clients…", "", ""], log_msg="[cyan]Server listening[/]")
+        self._update(live, pct=85, status=["[bold]Server mode[/]", "Waiting for clients…", f"Active clients: {len(self.active_clients)}", ""], log_msg="[cyan]Server listening[/]")
+        
         while not _quit_flag:
-            slot = None
             for i in range(MAX_CLIENTS):
-                if _d(f"offer_{i}.sdp") and not _d(f"answer_{i}.sdp"): slot = i; break
-            if slot is None: await asyncio.sleep(1); continue
-            of_str = await asyncio.get_event_loop().run_in_executor(None, _wd, f"offer_{slot}.sdp")
-            offer = json.loads(of_str); _del(f"offer_{slot}.sdp")
-            link_id = offer.get("link_id", "")
-            if not link_id: continue
-            self._update(live, log_msg=f"[cyan]Client link_id: {link_id}[/]")
-            try:
-                turn_list, stun = await asyncio.get_event_loop().run_in_executor(None, _g, link_id)
-                server_conn = await _best_connection(turn_list, stun)
-            except Exception as e: continue
-            for c_sdp in offer["candidates"]: await server_conn.add_remote_candidate(Candidate.from_sdp(c_sdp))
-            await server_conn.add_remote_candidate(None)
-            server_conn.remote_username = offer["username"]; server_conn.remote_password = offer["password"]
-            await server_conn.gather_candidates()
-            answer = {"candidates": [c.to_sdp() for c in server_conn.local_candidates], "username": server_conn.local_username, "password": server_conn.local_password}
-            _u(f"answer_{slot}.sdp", json.dumps(answer)); await server_conn.connect()
-            try:
-                msg = await asyncio.wait_for(server_conn.recv(), timeout=10)
-                req = msg.decode(errors='ignore'); upstream = self.upstream
-                if req.startswith("UPSTREAM:"):
-                    req_upstream = req.split(":", 1)[1].strip()
-                    if self.allowed_upstreams and req_upstream not in self.allowed_upstreams:
-                        await server_conn.send(b"DENIED"); continue
-                    upstream = req_upstream; await server_conn.send(b"OK")
-                else: await server_conn.send(b"OK")
-            except asyncio.TimeoutError: pass
-            host, port = upstream.split(":"); port = int(port)
-            if not host.replace('.', '').isdigit(): host = await asyncio.get_event_loop().run_in_executor(None, _resolve, host)
-            us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            us.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024*1024); us.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024*1024)
-            us.connect((host, port)); us.setblocking(False); lp = asyncio.get_event_loop()
-            async def _down(c=server_conn, u=us):
-                while not _quit_flag:
-                    try: d = await c.recv(); await lp.sock_sendall(u, d) if d else None
-                    except: pass
-            async def _up(c=server_conn, u=us):
-                while not _quit_flag:
-                    try: d = await lp.sock_recv(u, 65536); await c.send(d) if d else None
-                    except: pass
-            asyncio.ensure_future(_down()); asyncio.ensure_future(_up())
-            self._update(live, pct=100, bar_color="green", status=[f"[green]Relaying {upstream}[/]", "Tunnel active", "", ""], log_msg="[green]Server tunnel operational[/]")
+                if i in self.active_clients:
+                    continue
+                    
+                of_str = _d(f"offer_{i}.sdp")
+                if of_str and not _d(f"answer_{i}.sdp"):
+                    self._update(live, log_msg=f"[cyan]New client on slot {i}[/]")
+                    
+                    try:
+                        offer = json.loads(of_str)
+                        _del(f"offer_{i}.sdp")
+                        link_id = offer.get("link_id", "")
+                        
+                        if not link_id:
+                            continue
+                        
+                        turn_list, stun = await asyncio.get_event_loop().run_in_executor(None, _g, link_id)
+                        server_conn = await _best_connection(turn_list, stun)
+                        
+                        for c_sdp in offer["candidates"]:
+                            await server_conn.add_remote_candidate(Candidate.from_sdp(c_sdp))
+                        await server_conn.add_remote_candidate(None)
+                        server_conn.remote_username = offer["username"]
+                        server_conn.remote_password = offer["password"]
+                        await server_conn.gather_candidates()
+                        
+                        answer = {"candidates": [c.to_sdp() for c in server_conn.local_candidates],
+                                 "username": server_conn.local_username,
+                                 "password": server_conn.local_password}
+                        _u(f"answer_{i}.sdp", json.dumps(answer))
+                        await server_conn.connect()
+                        
+                        try:
+                            msg = await asyncio.wait_for(server_conn.recv(), timeout=10)
+                            req = msg.decode(errors='ignore')
+                            upstream = self.upstream
+                            if req.startswith("UPSTREAM:"):
+                                req_upstream = req.split(":", 1)[1].strip()
+                                if self.allowed_upstreams and req_upstream not in self.allowed_upstreams:
+                                    await server_conn.send(b"DENIED")
+                                    continue
+                                upstream = req_upstream
+                                await server_conn.send(b"OK")
+                            else:
+                                await server_conn.send(b"OK")
+                        except asyncio.TimeoutError:
+                            pass
+                        
+                        host, port = upstream.split(":"); port = int(port)
+                        if not host.replace('.', '').isdigit():
+                            host = await asyncio.get_event_loop().run_in_executor(None, _resolve, host)
+                        
+                        us = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        us.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024*1024)
+                        us.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024*1024)
+                        us.connect((host, port))
+                        us.setblocking(False)
+                        lp = asyncio.get_event_loop()
+                        
+                        self.active_clients[i] = {
+                            "conn": server_conn,
+                            "socket": us,
+                            "upstream": upstream,
+                            "down_task": None,
+                            "up_task": None
+                        }
+                        
+                        async def down(c=server_conn, u=us, slot=i):
+                            while not _quit_flag and slot in self.active_clients:
+                                try:
+                                    d = await c.recv()
+                                    if d:
+                                        await lp.sock_sendall(u, d)
+                                except:
+                                    await asyncio.sleep(0.1)
+                        
+                        async def up(c=server_conn, u=us, slot=i):
+                            while not _quit_flag and slot in self.active_clients:
+                                try:
+                                    d = await lp.sock_recv(u, 65536)
+                                    if d:
+                                        await c.send(d)
+                                except:
+                                    await asyncio.sleep(0.1)
+                        
+                        self.active_clients[i]["down_task"] = asyncio.create_task(down())
+                        self.active_clients[i]["up_task"] = asyncio.create_task(up())
+                        
+                        self._update(live, pct=100, bar_color="green",
+                                   status=[f"[green]Relaying {upstream}[/]", f"Tunnel active - Client {i}", f"Active clients: {len(self.active_clients)}", ""],
+                                   log_msg=f"[green]Client {i} tunnel operational[/]")
+                        
+                    except Exception as e:
+                        self._update(live, log_msg=f"[red]Error handling client {i}: {e}[/]")
+                        _del(f"answer_{i}.sdp")
+                        if i in self.active_clients:
+                            del self.active_clients[i]
+            
+            for slot in list(self.active_clients.keys()):
+                if _d(f"answer_{slot}.sdp"):
+                    self._update(live, log_msg=f"[yellow]Client {slot} disconnected[/]")
+                    if self.active_clients[slot]["down_task"]:
+                        self.active_clients[slot]["down_task"].cancel()
+                    if self.active_clients[slot]["up_task"]:
+                        self.active_clients[slot]["up_task"].cancel()
+                    del self.active_clients[slot]
+                    _del(f"answer_{slot}.sdp")
+                    self._update(live, status=["[bold]Server mode[/]", "Waiting for clients…", f"Active clients: {len(self.active_clients)}", ""])
+            
+            live.update(self._build_table())
+            await asyncio.sleep(1)
+    
     async def _run_client(self, live):
-        if not self.link_id: self._update(live, log_msg="[red]No link_id provided[/]"); return
+        if not self.link_id:
+            self._update(live, log_msg="[red]No link_id provided[/]")
+            return
+        
         self._update(live, pct=10, status=["[bold]Phase 1/3: TURN Allocation[/]", "Intercepting telemost credentials…", "", ""], log_msg="[cyan]TURN Allocation initiated[/]")
-        try: turn_list, stun = await asyncio.get_event_loop().run_in_executor(None, _g, self.link_id)
-        except Exception as e: self._update(live, log_msg=f"[red]TURN error: {e}[/]"); return
+        try:
+            turn_list, stun = await asyncio.get_event_loop().run_in_executor(None, _g, self.link_id)
+        except Exception as e:
+            self._update(live, log_msg=f"[red]TURN error: {e}[/]")
+            return
+        
         conn = await _best_connection(turn_list, stun)
         self._update(live, pct=75, status=["", "[green]▸ Fastest TURN selected[/]", "", ""], log_msg="[green]Fastest TURN connection established[/]")
         self._update(live, pct=85, status=["[bold]Phase 3/3: Signaling[/]", "Exchanging SDP via WebDAV", "", ""], log_msg="[cyan]Phase 3: Initiating handshake[/]")
-        slot = 0
-        for i in range(MAX_CLIENTS):
-            if not _d(f"offer_{i}.sdp") and not _d(f"answer_{i}.sdp"): slot = i; break
-        await conn.gather_candidates()
-        offer = {"candidates": [c.to_sdp() for c in conn.local_candidates], "username": conn.local_username, "password": conn.local_password, "link_id": self.link_id}
-        _u(f"offer_{slot}.sdp", json.dumps(offer))
-        self._update(live, log_msg="[cyan]Offer sent to server[/]")
-        ans_str = await asyncio.get_event_loop().run_in_executor(None, _wd, f"answer_{slot}.sdp")
-        ans = json.loads(ans_str); _del(f"answer_{slot}.sdp")
-        for c_sdp in ans["candidates"]: await conn.add_remote_candidate(Candidate.from_sdp(c_sdp))
-        await conn.add_remote_candidate(None); conn.remote_username = ans["username"]; conn.remote_password = ans["password"]
-        await conn.connect()
-        if self.upstream and self.upstream != "musicclips.videolinks.ru:8443":
-            await conn.send(f"UPSTREAM:{self.upstream}".encode())
-            try: await asyncio.wait_for(conn.recv(), timeout=10)
-            except: pass
-        vs = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        vs.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        vs.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024*1024); vs.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024*1024)
-        port = self.port
-        for _ in range(100):
-            try: vs.bind(('127.0.0.1', port)); break
-            except OSError: port += 1
-        vs.setblocking(True); vs.settimeout(0.5)
-        queue = asyncio.Queue(); last_addr = None; lp = asyncio.get_event_loop()
-        fail_count = 0
-        def recv_thread():
-            nonlocal last_addr
-            while not _quit_flag:
-                try: d, addr = vs.recvfrom(65536); last_addr = addr; asyncio.run_coroutine_threadsafe(queue.put((d, addr)), lp)
-                except socket.timeout: continue
-                except: continue
-        threading.Thread(target=recv_thread, daemon=True).start()
-        async def down():
-            nonlocal fail_count
-            while not _quit_flag:
-                try:
-                    d = await conn.recv()
-                    if d and last_addr: vs.sendto(d, last_addr); fail_count = 0
-                except: fail_count += 1
-        async def up():
-            nonlocal fail_count
-            while not _quit_flag:
-                try:
-                    d, addr = await asyncio.wait_for(queue.get(), timeout=1)
-                    if d: await conn.send(d); fail_count = 0
-                except asyncio.TimeoutError: pass
-                except: fail_count += 1
-                if fail_count > 3: self._update(live, log_msg="[red]⏰ Server timeout — switching...[/]"); break
-        asyncio.ensure_future(down()); asyncio.ensure_future(up())
-        self._update(live, pct=100, bar_color="green", status=[f"[green]▶ :{port} active[/]", "Tunnel ready", "", ""], log_msg="[green]Client tunnel established[/]")
-        while not _quit_flag and fail_count <= 3: await asyncio.sleep(1)
-        try: _del(f"answer_{slot}.sdp")
-        except: pass
-        self._update(live, pct=0, bar_color="yellow", status=["[yellow]Server lost[/]", "Waiting for new offer…", "", ""], log_msg="[yellow]Waiting for next server…[/]")
-    async def _run_p2p(self, live):
-        if not self.link_id: return
-        try: turn_list, stun = await asyncio.get_event_loop().run_in_executor(None, _g, self.link_id)
-        except: return
-        conn = await _best_connection(turn_list, stun)
+        
         slot = None
         for i in range(MAX_CLIENTS):
-            if _d(f"offer_{i}.sdp"): slot = i; break
-        if slot is not None:
-            of_str = await asyncio.get_event_loop().run_in_executor(None, _wd, f"offer_{slot}.sdp")
-            offer = json.loads(of_str); _del(f"offer_{slot}.sdp")
-            for c_sdp in offer["candidates"]: await conn.add_remote_candidate(Candidate.from_sdp(c_sdp))
-            await conn.add_remote_candidate(None); conn.remote_username = offer["username"]; conn.remote_password = offer["password"]
-            await conn.gather_candidates()
-            answer = {"candidates": [c.to_sdp() for c in conn.local_candidates], "username": conn.local_username, "password": conn.local_password}
-            _u(f"answer_{slot}.sdp", json.dumps(answer)); await conn.connect()
-        else:
-            for i in range(MAX_CLIENTS):
-                if not _d(f"offer_{i}.sdp") and not _d(f"answer_{i}.sdp"): slot = i; break
-            if slot is None: return
-            await conn.gather_candidates()
-            offer = {"candidates": [c.to_sdp() for c in conn.local_candidates], "username": conn.local_username, "password": conn.local_password, "link_id": self.link_id}
-            _u(f"offer_{slot}.sdp", json.dumps(offer))
-            ans_str = await asyncio.get_event_loop().run_in_executor(None, _wd, f"answer_{slot}.sdp")
-            ans = json.loads(ans_str); _del(f"answer_{slot}.sdp")
-            for c_sdp in ans["candidates"]: await conn.add_remote_candidate(Candidate.from_sdp(c_sdp))
-            await conn.add_remote_candidate(None); conn.remote_username = ans["username"]; conn.remote_password = ans["password"]
-            await conn.connect()
+            if not _d(f"offer_{i}.sdp") and not _d(f"answer_{i}.sdp"):
+                slot = i
+                break
+        
+        if slot is None:
+            self._update(live, log_msg="[red]No available slots[/]")
+            return
+        
+        await conn.gather_candidates()
+        offer = {"candidates": [c.to_sdp() for c in conn.local_candidates],
+                "username": conn.local_username,
+                "password": conn.local_password,
+                "link_id": self.link_id}
+        _u(f"offer_{slot}.sdp", json.dumps(offer))
+        self._update(live, log_msg=f"[cyan]Offer sent to server (slot {slot})[/]")
+        
+        ans_str = await asyncio.get_event_loop().run_in_executor(None, _wd, f"answer_{slot}.sdp")
+        ans = json.loads(ans_str)
+        _del(f"answer_{slot}.sdp")
+        
+        for c_sdp in ans["candidates"]:
+            await conn.add_remote_candidate(Candidate.from_sdp(c_sdp))
+        await conn.add_remote_candidate(None)
+        conn.remote_username = ans["username"]
+        conn.remote_password = ans["password"]
+        await conn.connect()
+        
         if self.upstream and self.upstream != "musicclips.videolinks.ru:8443":
             await conn.send(f"UPSTREAM:{self.upstream}".encode())
+            try:
+                await asyncio.wait_for(conn.recv(), timeout=10)
+            except:
+                pass
+        
         vs = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         vs.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        vs.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024*1024); vs.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024*1024)
+        vs.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024*1024)
+        vs.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024*1024)
         port = self.port
         for _ in range(100):
-            try: vs.bind(('127.0.0.1', port)); break
-            except OSError: port += 1
-        vs.setblocking(True); vs.settimeout(0.5)
-        queue = asyncio.Queue(); last_addr = None; lp = asyncio.get_event_loop()
+            try:
+                vs.bind(('127.0.0.1', port))
+                break
+            except OSError:
+                port += 1
+        vs.setblocking(True)
+        vs.settimeout(0.5)
+        
+        queue = asyncio.Queue()
+        last_addr = None
+        lp = asyncio.get_event_loop()
         fail_count = 0
+        
         def recv_thread():
             nonlocal last_addr
             while not _quit_flag:
-                try: d, addr = vs.recvfrom(65536); last_addr = addr; asyncio.run_coroutine_threadsafe(queue.put((d, addr)), lp)
-                except socket.timeout: continue
-                except: continue
+                try:
+                    d, addr = vs.recvfrom(65536)
+                    last_addr = addr
+                    asyncio.run_coroutine_threadsafe(queue.put((d, addr)), lp)
+                except socket.timeout:
+                    continue
+                except:
+                    continue
+        
         threading.Thread(target=recv_thread, daemon=True).start()
+        
         async def down():
             nonlocal fail_count
             while not _quit_flag:
                 try:
                     d = await conn.recv()
-                    if d and last_addr: vs.sendto(d, last_addr); fail_count = 0
-                except: fail_count += 1
+                    if d and last_addr:
+                        vs.sendto(d, last_addr)
+                        fail_count = 0
+                except:
+                    fail_count += 1
+        
         async def up():
             nonlocal fail_count
             while not _quit_flag:
                 try:
                     d, addr = await asyncio.wait_for(queue.get(), timeout=1)
-                    if d: await conn.send(d); fail_count = 0
-                except asyncio.TimeoutError: pass
-                except: fail_count += 1
-                if fail_count > 3: break
-        asyncio.ensure_future(down()); asyncio.ensure_future(up())
-        self._update(live, pct=100, bar_color="green", status=[f"[green]🚀 P2P :{port} active[/]", "Direct tunnel ready", "", ""], log_msg="[green]P2P tunnel established[/]")
-        while not _quit_flag and fail_count <= 3: await asyncio.sleep(1)
-        self._update(live, pct=0, bar_color="yellow", status=["[yellow]Peer lost[/]", "Waiting…", "", ""], log_msg="[yellow]Waiting for next peer…[/]")
+                    if d:
+                        await conn.send(d)
+                        fail_count = 0
+                except asyncio.TimeoutError:
+                    pass
+                except:
+                    fail_count += 1
+                if fail_count > 3:
+                    self._update(live, log_msg="[red]⏰ Server timeout — switching...[/]")
+                    break
+        
+        asyncio.ensure_future(down())
+        asyncio.ensure_future(up())
+        
+        self._update(live, pct=100, bar_color="green",
+                   status=[f"[green]▶ :{port} active[/]", "Tunnel ready", "", ""],
+                   log_msg=f"[green]Client tunnel established on port {port}[/]")
+        
+        while not _quit_flag and fail_count <= 3:
+            live.update(self._build_table())
+            await asyncio.sleep(1)
+        
+        try:
+            _del(f"offer_{slot}.sdp")
+        except:
+            pass
+        
+        self._update(live, pct=0, bar_color="yellow",
+                   status=["[yellow]Server lost[/]", "Waiting for new offer…", "", ""],
+                   log_msg="[yellow]Waiting for next server…[/]")
+    
+    async def _run_p2p(self, live):
+        if not self.link_id:
+            return
+        
+        try:
+            turn_list, stun = await asyncio.get_event_loop().run_in_executor(None, _g, self.link_id)
+        except:
+            return
+        
+        conn = await _best_connection(turn_list, stun)
+        
+        slot = None
+        for i in range(MAX_CLIENTS):
+            if _d(f"offer_{i}.sdp"):
+                slot = i
+                break
+        
+        if slot is not None:
+            of_str = await asyncio.get_event_loop().run_in_executor(None, _wd, f"offer_{slot}.sdp")
+            offer = json.loads(of_str)
+            _del(f"offer_{slot}.sdp")
+            for c_sdp in offer["candidates"]:
+                await conn.add_remote_candidate(Candidate.from_sdp(c_sdp))
+            await conn.add_remote_candidate(None)
+            conn.remote_username = offer["username"]
+            conn.remote_password = offer["password"]
+            await conn.gather_candidates()
+            answer = {"candidates": [c.to_sdp() for c in conn.local_candidates],
+                     "username": conn.local_username,
+                     "password": conn.local_password}
+            _u(f"answer_{slot}.sdp", json.dumps(answer))
+            await conn.connect()
+        else:
+            for i in range(MAX_CLIENTS):
+                if not _d(f"offer_{i}.sdp") and not _d(f"answer_{i}.sdp"):
+                    slot = i
+                    break
+            if slot is None:
+                return
+            await conn.gather_candidates()
+            offer = {"candidates": [c.to_sdp() for c in conn.local_candidates],
+                    "username": conn.local_username,
+                    "password": conn.local_password,
+                    "link_id": self.link_id}
+            _u(f"offer_{slot}.sdp", json.dumps(offer))
+            ans_str = await asyncio.get_event_loop().run_in_executor(None, _wd, f"answer_{slot}.sdp")
+            ans = json.loads(ans_str)
+            _del(f"answer_{slot}.sdp")
+            for c_sdp in ans["candidates"]:
+                await conn.add_remote_candidate(Candidate.from_sdp(c_sdp))
+            await conn.add_remote_candidate(None)
+            conn.remote_username = ans["username"]
+            conn.remote_password = ans["password"]
+            await conn.connect()
+        
+        if self.upstream and self.upstream != "musicclips.videolinks.ru:8443":
+            await conn.send(f"UPSTREAM:{self.upstream}".encode())
+        
+        vs = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        vs.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        vs.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024*1024)
+        vs.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024*1024)
+        port = self.port
+        for _ in range(100):
+            try:
+                vs.bind(('127.0.0.1', port))
+                break
+            except OSError:
+                port += 1
+        vs.setblocking(True)
+        vs.settimeout(0.5)
+        
+        queue = asyncio.Queue()
+        last_addr = None
+        lp = asyncio.get_event_loop()
+        fail_count = 0
+        
+        def recv_thread():
+            nonlocal last_addr
+            while not _quit_flag:
+                try:
+                    d, addr = vs.recvfrom(65536)
+                    last_addr = addr
+                    asyncio.run_coroutine_threadsafe(queue.put((d, addr)), lp)
+                except socket.timeout:
+                    continue
+                except:
+                    continue
+        
+        threading.Thread(target=recv_thread, daemon=True).start()
+        
+        async def down():
+            nonlocal fail_count
+            while not _quit_flag:
+                try:
+                    d = await conn.recv()
+                    if d and last_addr:
+                        vs.sendto(d, last_addr)
+                        fail_count = 0
+                except:
+                    fail_count += 1
+        
+        async def up():
+            nonlocal fail_count
+            while not _quit_flag:
+                try:
+                    d, addr = await asyncio.wait_for(queue.get(), timeout=1)
+                    if d:
+                        await conn.send(d)
+                        fail_count = 0
+                except asyncio.TimeoutError:
+                    pass
+                except:
+                    fail_count += 1
+                if fail_count > 3:
+                    break
+        
+        asyncio.ensure_future(down())
+        asyncio.ensure_future(up())
+        
+        self._update(live, pct=100, bar_color="green",
+                   status=[f"[green]🚀 P2P :{port} active[/]", "Direct tunnel ready", "", ""],
+                   log_msg="[green]P2P tunnel established[/]")
+        
+        while not _quit_flag and fail_count <= 3:
+            live.update(self._build_table())
+            await asyncio.sleep(1)
+        
+        self._update(live, pct=0, bar_color="yellow",
+                   status=["[yellow]Peer lost[/]", "Waiting…", "", ""],
+                   log_msg="[yellow]Waiting for next peer…[/]")
+
+def _oobe():
+    """Out Of Box Experience - Setup and test DAV authentication only"""
+    console.print("[bold cyan]Burrow VPN - Out Of Box Experience[/]\n")
+    console.print("[yellow]This will test your Yandex WebDAV credentials only.[/]")
+    console.print("[dim]TURN functionality requires a valid Telemost link during runtime.[/]\n")
+    
+    # Test WebDAV
+    console.print("[1] Testing WebDAV authentication...")
+    
+    # Get credentials interactively
+    console.print("[cyan]Enter your Yandex credentials:[/]")
+    login = console.input("Email: ")
+    password = console.input("Password: ", password=True)
+    
+    if not login or not password:
+        console.print("[red]✗ Credentials required[/]")
+        return False
+    
+    try:
+        auth = (login, password)
+        test_file = f"test_{uuid.uuid4().hex[:8]}.txt"
+        test_data = f"burrow_test_{int(time.time())}"
+        
+        # Test write
+        put_r = requests.put(f"{W}/{test_file}", data=test_data, auth=auth, timeout=10)
+        if put_r.status_code not in [200, 201]:
+            console.print(f"[red]✗ Write failed: HTTP {put_r.status_code}[/]")
+            return False
+        
+        # Test read
+        get_r = requests.get(f"{W}/{test_file}", auth=auth, timeout=10)
+        if get_r.status_code != 200 or get_r.text != test_data:
+            console.print(f"[red]✗ Read failed: HTTP {get_r.status_code}[/]")
+            return False
+        
+        # Test delete
+        del_r = requests.delete(f"{W}/{test_file}", auth=auth, timeout=10)
+        
+        console.print("[green]✓ WebDAV working correctly![/]")
+        
+        # Save to config
+        config = _load_config()
+        config["dav"] = f"{login}:{password}"
+        _save_config(config)
+        console.print("[green]✓ Credentials saved to ~/.burrow/config.json[/]")
+        
+        return True
+        
+    except requests.exceptions.ConnectionError:
+        console.print("[red]✗ Cannot connect to webdav.yandex.ru[/]")
+        return False
+    except Exception as e:
+        console.print(f"[red]✗ WebDAV error: {e}[/]")
+        return False
+
 if __name__ == "__main__":
-    import sys as _sys
-    for _ in range(7): print()
-    _sys.stdout.write(f'\033[7A'); _sys.stdout.write('\033[?25l')
-    for i in range(1, len(BANNER.split('\n')[0]) + 1):
-        _sys.stdout.write(f'\033[7A')
-        for line in BANNER.split('\n'):
-            _sys.stdout.write('\033[K' + line[:i].ljust(i) + '\n')
-        _sys.stdout.write('\033[K' + COPYRIGHT[:i].ljust(i) + '\n')
-        _sys.stdout.flush(); time.sleep(0.005)
-    time.sleep(3)
-    _sys.stdout.write(f'\033[7A')
-    for _ in range(7): _sys.stdout.write('\033[K\n')
-    _sys.stdout.write(f'\033[7A'); _sys.stdout.write('\033[?25h')
     config = _load_config()
     p = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-s", action="store_true", help="Server mode")
@@ -431,12 +712,23 @@ if __name__ == "__main__":
     p.add_argument("--port", type=int, default=config.get("port", 9000))
     p.add_argument("--upstream", default=config.get("upstream", "musicclips.videolinks.ru:8443"))
     p.add_argument("--allowed", default="")
+    p.add_argument("--oobe", action="store_true", help="Out Of Box Experience - test DAV credentials only")
     p.add_argument("link_id", nargs="?", default=config.get("link_id", ""))
     a = p.parse_args()
+    
+    # OOBE mode - test DAV only
+    if a.oobe:
+        _oobe()
+        sys.exit(0)
+    
     allowed = [x.strip() for x in a.allowed.split(",") if x.strip()] if a.s else []
-    config["port"] = a.port; config["upstream"] = a.upstream; config["link_id"] = a.link_id
+    config["port"] = a.port
+    config["upstream"] = a.upstream
+    config["link_id"] = a.link_id
     config["mode"] = "server" if a.s else ("p2p" if a.p2p else "client")
     _save_config(config)
     b = _B(a.port, a.s, a.p2p, a.upstream, allowed)
-    try: asyncio.run(b.start(a.link_id))
-    except KeyboardInterrupt: pass
+    try:
+        asyncio.run(b.start(a.link_id))
+    except KeyboardInterrupt:
+        pass
