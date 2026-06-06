@@ -1,0 +1,37 @@
+# .github/workflows/burrow-server.yml
+name: Burrow VPN Server
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'      # every 6 hours
+  workflow_dispatch:
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360        # 6 hours, we stop at 5h59m50s
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install aioice rich requests
+
+      - name: Create secrets file
+        run: |
+          cat > burrow_secrets.py << 'EOF'
+          YA_LOGIN = "${{ secrets.YA_LOGIN }}"
+          YA_PASSWORD = "${{ secrets.YA_PASSWORD }}"
+          EOF
+
+      - name: Run Burrow server (auto‑restart before timeout)
+        env:
+          LINK_ID: ${{ secrets.LINK_ID }}
+        run: |
+          timeout -s SIGTERM 21590 python burrow.py -s ${LINK_ID}
